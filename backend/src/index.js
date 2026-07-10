@@ -24,7 +24,15 @@ app.use(express.urlencoded({ extended: true }));
 // Serve static assets (if any thumbnail uploads are saved in backend)
 app.use('/uploads', express.static('uploads'));
 
-// Health Check
+// Health Check & Root welcome
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Welcome to the NovaWear AI Customer Support API.',
+    status: 'online',
+    healthCheck: '/api/health'
+  });
+});
+
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'online',
