@@ -1,8 +1,20 @@
-# Dependency directories
+# =========================================================================
+# 🚫 NovaWear Git Exclusion Configuration (.gitignore)
+# =========================================================================
+
+# -------------------------------------------------------------------------
+# 📦 Dependency Folders
+# Excludes local package builds to keep the repository lightweight.
+# Re-install via `npm install` on clean environments.
+# -------------------------------------------------------------------------
 node_modules/
 **/node_modules/
 
-# Local environment variables
+# -------------------------------------------------------------------------
+# 🔑 Sensitive Environment Configuration Secrets
+# CRITICAL: Prevents pushing database credentials, OpenAI keys, and JWT
+# secrets to public GitHub repositories.
+# -------------------------------------------------------------------------
 .env
 .env.local
 .env.development.local
@@ -11,24 +23,35 @@ node_modules/
 **/.env
 **/.env.*
 
-# Production builds
+# -------------------------------------------------------------------------
+# 🚀 Production Bundles & Build Outputs
+# Prevents committing build artifacts that are auto-generated on deployment.
+# -------------------------------------------------------------------------
 dist/
 build/
 out/
 .next/
 
-# IDEs and OS Metadata
+# -------------------------------------------------------------------------
+# 💻 Integrated Development Environments (IDEs) & System files
+# Avoids committing user-specific configurations and OS metadata indexes.
+# -------------------------------------------------------------------------
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 
-# Debug logs
+# -------------------------------------------------------------------------
+# 📝 Diagnostics & Debug Logging Outputs
+# -------------------------------------------------------------------------
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# Workspace artifacts and scratch files
+# -------------------------------------------------------------------------
+# 🤖 Workspace Helper Tools & Scratch Files
+# Excludes local development utility files and playground run folders.
+# -------------------------------------------------------------------------
 scratch/
