@@ -7,6 +7,10 @@ import {
 } from 'lucide-react';
 import { API_BASE } from '../App';
 
+/**
+ * Format MIME type to a short, user-friendly extension string
+ * for display badges on the Knowledge Base table.
+ */
 const formatFileType = (mimeType) => {
   if (!mimeType) return 'DOC';
   const lower = mimeType.toLowerCase();
@@ -18,6 +22,14 @@ const formatFileType = (mimeType) => {
   return parts[1] ? parts[1].toUpperCase() : 'DOC';
 };
 
+/**
+ * AdminDashboard Page Component:
+ * Admin management portal that handles:
+ * - Document Upload & RAG Indexing management (PDF, Word, Markdown, Text).
+ * - MongoDB database seeding & reset trigger.
+ * - Product catalog creation, editing, and deletion.
+ * - Live Inventory levels update forms.
+ */
 export default function AdminDashboard() {
   const [activeTab, setActiveTab] = useState('rag'); // 'rag' | 'products' | 'inventory'
   

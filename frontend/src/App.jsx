@@ -5,9 +5,14 @@ import axios from 'axios';
 import CustomerChat from './pages/CustomerChat';
 import AdminDashboard from './pages/AdminDashboard';
 
-// Environment backend base URL
+// Environment backend base URL configurations
 export const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:5000/api';
 
+/**
+ * NavigationBar Component:
+ * Displays global header links, branding logo, user credentials,
+ * and real-time backend api health state indicators.
+ */
 function NavigationBar({ currentUser, handleLogout, health }) {
   const location = useLocation();
 
@@ -82,6 +87,10 @@ function NavigationBar({ currentUser, handleLogout, health }) {
   );
 }
 
+/**
+ * ProtectedAdminRoute Component:
+ * Client-side route wrapper preventing non-admin accounts from loading admin views.
+ */
 function ProtectedAdminRoute({ currentUser, children }) {
   if (!currentUser || currentUser.role !== 'admin') {
     return <Navigate to="/" replace />;
@@ -89,6 +98,11 @@ function ProtectedAdminRoute({ currentUser, children }) {
   return children;
 }
 
+/**
+ * AuthScreen Component:
+ * Render form sheets for user Login and signup registration. Includes size
+ * and styling preference configuration drop-downs for new user profiling.
+ */
 function AuthScreen({ onAuthSuccess }) {
   const [isRegistering, setIsRegistering] = useState(false);
   const [authEmail, setAuthEmail] = useState('');
@@ -288,6 +302,11 @@ function AuthScreen({ onAuthSuccess }) {
   );
 }
 
+/**
+ * Main App Component:
+ * Handles global authenticated user states, default headers setup on login,
+ * and renders routes to the customer portal and protected admin dashboard.
+ */
 function App() {
   const [currentUser, setCurrentUser] = useState(() => {
     const saved = localStorage.getItem('novawear_user');
@@ -296,6 +315,7 @@ function App() {
 
   const [health, setHealth] = useState(null);
 
+  // Sync token value to Axios common headers
   useEffect(() => {
     if (currentUser && currentUser.token) {
       axios.defaults.headers.common['Authorization'] = `Bearer ${currentUser.token}`;
@@ -304,6 +324,7 @@ function App() {
     }
   }, [currentUser]);
 
+  // Performs recurring health checks every 15s to verify server connectivity
   useEffect(() => {
     const checkHealth = async () => {
       try {
@@ -321,7 +342,6 @@ function App() {
   const handleAuthSuccess = (user) => {
     setCurrentUser(user);
     if (user.role === 'admin') {
-      // Force initial redirect to /admin on login
       window.history.pushState({}, '', '/admin');
     }
   };

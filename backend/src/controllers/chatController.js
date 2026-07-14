@@ -6,8 +6,12 @@ import { toolDefinitions, executeTool } from '../tools/chatbotTools.js';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
- * Chat Controller that processes customer queries, performs RAG retrieval,
- * manages OpenAI tool calling cycles, and streams the final response.
+ * handleChatMessage: Main API controller that processes customer queries.
+ * 1. Checks or initiates a unique conversation UUID.
+ * 2. Fetches the logged-in customer's preferences context (if authenticated).
+ * 3. Retrieves semantic RAG document chunks from Qdrant Cloud.
+ * 4. Resolves recursive OpenAI tool executions (for inventory/order lookups) in a loop (max 5 rounds).
+ * 5. Streams the final reasoning outputs word-by-word back to the user via Server-Sent Events (SSE).
  */
 export const handleChatMessage = async (req, res) => {
   let { message, conversationId, userId = 'guest' } = req.body;
@@ -34,7 +38,7 @@ export const handleChatMessage = async (req, res) => {
       });
     }
 
-    // 2b. Fetch active customer profile if authenticated (non-guest)
+    // 2b. Fetch active customer profile if authenticated (non-guest) to inject sizing preferences
     let customerContext = '';
     if (userId && userId !== 'guest') {
       try {
@@ -148,7 +152,6 @@ ${contextText || 'No documents retrieved. Explain that you can search the produc
         currentRound++;
       } else {
         // No tool calls needed, this is the final message payload we want to stream!
-        // We will remove the last completion choice and request it via stream to capture SSE chunks.
         finalPayloadForStreaming = fullMessages;
         break;
       }
@@ -206,7 +209,8 @@ ${contextText || 'No documents retrieved. Explain that you can search the produc
 };
 
 /**
- * Endpoint to load a conversation session.
+ * getConversation: Loads details for a specific conversation session
+ * matching the conversation ID parameter.
  */
 export const getConversation = async (req, res) => {
   const { conversationId } = req.params;
@@ -222,7 +226,8 @@ export const getConversation = async (req, res) => {
 };
 
 /**
- * Endpoint to list all active conversations.
+ * getConversationsList: Retrieves past conversation session list
+ * optionally filtering by the authenticated user's ID.
  */
 export const getConversationsList = async (req, res) => {
   const { userId } = req.query;
@@ -236,7 +241,8 @@ export const getConversationsList = async (req, res) => {
 };
 
 /**
- * Endpoint to list first 15 standard customers.
+ * getCustomersList: Returns list of customer logins to display
+ * inside helper quick-login view. Limited to 15 records.
  */
 export const getCustomersList = async (req, res) => {
   try {

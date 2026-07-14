@@ -13,14 +13,20 @@ if (hasApiKey) {
   console.warn('WARNING: OPENAI_API_KEY is not configured. AI responses will be simulated.');
 }
 
+/**
+ * OpenAiService: Wrapper class coordinating requests to the OpenAI API endpoints
+ * including text embeddings creation, batch vectorization, and streaming chat completions.
+ */
 class OpenAiService {
   /**
    * Generates a 1536-dimension embedding for the given text using text-embedding-3-small.
    * Falls back to a mock embedding if API key is not present.
+   * @param {string} text - The input text snippet to vectorize
+   * @returns {Promise<number[]>} 1536 floating point numbers vector
    */
   static async getEmbedding(text) {
     if (!hasApiKey || !openai) {
-      // Mock embedding: Generate deterministic array of 1536 numbers
+      // Mock embedding: Generate deterministic array of 1536 numbers matching text characters
       const mockVector = new Array(1536).fill(0).map((_, i) => {
         let hash = 0;
         for (let j = 0; j < text.length; j++) {
@@ -46,6 +52,9 @@ class OpenAiService {
 
   /**
    * Generates embeddings in batch for performance.
+   * Useful when seeding product catalogs or indexing parsed document chunks.
+   * @param {string[]} texts - Array of text blocks to embed
+   * @returns {Promise<number[][]>} Nested array of vectors
    */
   static async getEmbeddingsBatch(texts) {
     if (!hasApiKey || !openai) {
@@ -67,6 +76,9 @@ class OpenAiService {
 
   /**
    * Simple chat completion call (mainly for summarizations or non-streaming responses)
+   * @param {object[]} messages - Chat history array containing roles and content
+   * @param {object} options - Optional overrides (temperature, tool lists)
+   * @returns {Promise<object>} OpenAI completion payload
    */
   static async chatCompletion(messages, options = {}) {
     if (!hasApiKey || !openai) {
@@ -95,10 +107,14 @@ class OpenAiService {
   /**
    * SSE Stream response for final completions.
    * Calls OpenAI completions endpoint with streaming active and returns the stream.
+   * Falls back to a mock streaming generator if the API key is not configured.
+   * @param {object[]} messages - Chat history array containing roles and content
+   * @param {object} options - Optional overrides (temperature, tool lists)
+   * @returns {Promise<object>} Readable Async Generator stream
    */
   static async chatCompletionStream(messages, options = {}) {
     if (!hasApiKey || !openai) {
-      // Return a mock stream object that implements async iterator
+      // Return a mock stream object that implements async iterator to simulate chat stream
       return {
         async *[Symbol.asyncIterator]() {
           const text = "Hi there! I am the NovaWear AI assistant. (OpenAI API key is not configured, so I am running in demo mode). How can I assist you with our garments brand today? You can ask me about product sizing, care instructions, shipping and return policies, or check out our catalogue!";

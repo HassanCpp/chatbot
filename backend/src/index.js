@@ -10,21 +10,28 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Enable CORS
+/**
+ * CORS Middleware Configuration:
+ * Express server configurations allowing secure pre-flight OPTIONS checks
+ * and cross-origin Authorization headers mapping from browsers.
+ */
 app.use(cors({
   origin: '*', // Allow all origins for local dev convenience
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-User-Role']
 }));
 
-// Parsers
+// Body Parser Middlewares
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Serve static assets (if any thumbnail uploads are saved in backend)
 app.use('/uploads', express.static('uploads'));
 
-// Health Check & Root welcome
+/**
+ * API Root Welcome Handler:
+ * Displays active service description metadata to browser.
+ */
 app.get('/', (req, res) => {
   res.json({
     message: 'Welcome to the NovaWear AI Customer Support API.',
@@ -33,6 +40,10 @@ app.get('/', (req, res) => {
   });
 });
 
+/**
+ * Health Check Endpoint:
+ * Invoked by client dashboard UI to check server online health status.
+ */
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'online',
@@ -52,7 +63,10 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Startup Databases and Express
+/**
+ * Server Initializer:
+ * Connects to MongoDB, sets up Qdrant collections, and boots express listeners.
+ */
 const startServer = async () => {
   console.log('Connecting to database...');
   await connectDB();

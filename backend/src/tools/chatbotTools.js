@@ -3,7 +3,10 @@ import Order from '../models/Order.js';
 import Conversation from '../models/Conversation.js';
 import Category from '../models/Category.js';
 
-// Define the OpenAI tools specifications
+/**
+ * toolDefinitions: Describes functions available for GPT-4o to execute.
+ * Tells the LLM which database fields and operations are accessible dynamically.
+ */
 export const toolDefinitions = [
   {
     type: 'function',
@@ -212,7 +215,10 @@ export const toolDefinitions = [
   }
 ];
 
-// Implementation of each tool function
+/**
+ * toolExecutors: Key-value map of actual asynchronous database queries
+ * triggered when GPT-4o requests dynamic tool executions.
+ */
 export const toolExecutors = {
   searchProducts: async ({ query, gender, category }) => {
     let filter = {};
@@ -353,6 +359,9 @@ export const toolExecutors = {
 
 /**
  * Main engine handler to execute a tool function call requested by OpenAI GPT.
+ * Parses the arguments string and runs the mapped executor.
+ * @param {object} toolCall - The tool call payload block from OpenAI
+ * @returns {Promise<string>} JSON string result of database operation
  */
 export const executeTool = async (toolCall) => {
   const { name, arguments: argsString } = toolCall.function;

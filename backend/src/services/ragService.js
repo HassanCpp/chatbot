@@ -6,9 +6,18 @@ import OpenAiService from './openAiService.js';
 import { qdrantClient, COLLECTION_NAME } from '../config/qdrant.js';
 import UploadedKnowledge from '../models/UploadedKnowledge.js';
 
+/**
+ * RagService: Orchestrates the processing of text manuals.
+ * Parses PDF/Word/Text files, splits content into overlapping semantic text chunks,
+ * vectorizes them via OpenAI, and syncs indexes between MongoDB and Qdrant.
+ */
 class RagService {
   /**
    * Parse uploaded file buffer based on MIME type.
+   * Supports PDF, DOCX (Word), TXT, and Markdown files.
+   * @param {Buffer} buffer - Raw file bytes buffer
+   * @param {string} mimeType - Browser/Multer upload mimetype string
+   * @returns {Promise<string>} Parsed plain text representation of the file
    */
   static async parseDocument(buffer, mimeType) {
     if (mimeType === 'application/pdf') {
@@ -32,7 +41,12 @@ class RagService {
   }
 
   /**
-   * Chunk text into smaller segments with overlapping content.
+   * Chunk text into smaller segments with overlapping content to preserve semantic context.
+   * Splits text cleanly at nearest periods, spaces, or newlines inside character limits.
+   * @param {string} text - Raw string content of the document
+   * @param {number} maxChunkSize - Maximum length of a single text segment (default: 800)
+   * @param {number} overlap - Overlapping characters between consecutive chunks (default: 150)
+   * @returns {string[]} Array of semantic text chunks
    */
   static chunkText(text, maxChunkSize = 800, overlap = 150) {
     // Clean up text double spacings and newlines
@@ -70,7 +84,10 @@ class RagService {
   }
 
   /**
-   * Generates embeddings for chunks, upserts them to Qdrant, and saves file meta to MongoDB.
+   * Generates embeddings for chunks, upserts them to Qdrant, and saves file metadata to MongoDB.
+   * @param {object} fileInfo - Multer upload metadata details
+   * @param {Buffer} buffer - File buffer bytes
+   * @returns {Promise<object>} UploadedKnowledge MongoDB schema record instance
    */
   static async indexDocument(fileInfo, buffer) {
     const text = await this.parseDocument(buffer, fileInfo.mimetype);
@@ -135,8 +152,11 @@ class RagService {
   }
 
   /**
-   * Search for similar text chunks in Qdrant.
+   * Search for similar text chunks in Qdrant based on query embedding vector similarity.
    * If Qdrant is unavailable, does a keyword-based MongoDB backup search or returns empty.
+   * @param {string} query - The search text query
+   * @param {number} limit - Maximum matches to return (default: 5)
+   * @returns {Promise<object[]>} Matched context objects containing text content and similarity score
    */
   static async retrieveRelevantContext(query, limit = 5) {
     try {
@@ -164,7 +184,9 @@ class RagService {
   }
 
   /**
-   * Delete document chunks from Qdrant and metadata from MongoDB.
+   * Delete document chunks from Qdrant, the physical file from disk, and metadata from MongoDB.
+   * @param {string} docId - The UploadedKnowledge MongoDB ID
+   * @returns {Promise<object>} Demoted database metadata object
    */
   static async deleteDocument(docId) {
     const doc = await UploadedKnowledge.findById(docId);
@@ -201,6 +223,8 @@ class RagService {
 
   /**
    * Re-indexes all document files stored in MongoDB.
+   * Parses current files, overwrites old vectors, and updates metadata counts.
+   * @returns {Promise<number>} Number of successfully reindexed files
    */
   static async reindexAll() {
     const docs = await UploadedKnowledge.find({});

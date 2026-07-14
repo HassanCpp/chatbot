@@ -7,6 +7,14 @@ import {
 } from 'lucide-react';
 import { API_BASE } from '../App';
 
+/**
+ * CustomerChat Page Component:
+ * The primary customer interface containing:
+ * - Active chat session list on left panel.
+ * - SSE-powered streaming dialogue bubble screen.
+ * - Right panel with interactive database lookup tools (Garment Catalog, Order Tracker).
+ * - Multi-round tool execution logs rendering.
+ */
 export default function CustomerChat({ currentUser, handleLogout }) {
   const [conversations, setConversations] = useState([]);
   const [currentId, setCurrentId] = useState('');

@@ -3,7 +3,11 @@ import rateLimit from 'express-rate-limit';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_novawear_key_2026_98821';
 
-// Rate limit customer chatbot API (Max 30 requests per minute per IP)
+/**
+ * Rate Limiter Middleware: Prevents spam requests on chat endpoints
+ * to preserve OpenAI API and Qdrant database resources.
+ * Limits each IP address to 30 requests per minute.
+ */
 export const chatRateLimiter = rateLimit({
   windowMs: 1 * 60 * 1000,
   max: 30,
@@ -14,7 +18,10 @@ export const chatRateLimiter = rateLimit({
   legacyHeaders: false
 });
 
-// Verify JWT and require admin role
+/**
+ * requireAdmin Middleware: Restricts access to routes to Admin accounts only.
+ * Extracts, decodes, and cryptographically verifies the bearer JWT token.
+ */
 export const requireAdmin = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -40,7 +47,10 @@ export const requireAdmin = (req, res, next) => {
   }
 };
 
-// Optional JWT authentication for customer chat sessions
+/**
+ * optionalAuth Middleware: Extracts profile context from the JWT token if present.
+ * Allows guest users to continue chatting normally if they are not logged in.
+ */
 export const optionalAuth = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   if (authHeader && authHeader.startsWith('Bearer ')) {
