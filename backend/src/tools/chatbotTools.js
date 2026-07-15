@@ -18,7 +18,7 @@ export const toolDefinitions = [
         properties: {
           query: { type: 'string', description: 'Search term for name, description, tags, e.g. "oversized t-shirt", "winter jacket"' },
           gender: { type: 'string', enum: ['Men', 'Women', 'Unisex'], description: 'Filter by gender' },
-          category: { type: 'string', description: 'Filter by category name, e.g. "Tops", "Bottoms"' }
+          category: { type: 'string', description: 'Filter by category name. Allowed values: T-Shirts, Shirts, Jeans, Hoodies, Jackets, Activewear, Shoes, Accessories.' }
         }
       }
     }
@@ -59,8 +59,8 @@ export const toolDefinitions = [
       parameters: {
         type: 'object',
         properties: {
-          category: { type: 'string', description: 'The category to filter by (e.g. Tops, Bottoms, Outerwear)' },
-          subCategory: { type: 'string', description: 'The subcategory (e.g. T-Shirts, Hoodies, Jeans)' }
+          category: { type: 'string', description: 'The category to filter by. Allowed values: T-Shirts, Shirts, Jeans, Hoodies, Jackets, Activewear, Shoes, Accessories.' },
+          subCategory: { type: 'string', description: 'The subcategory/style, e.g. Crew neck, V-neck, Oversized, Bomber, Puffer, Sneakers, Caps.' }
         },
         required: ['category']
       }
