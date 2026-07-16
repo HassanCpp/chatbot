@@ -58,12 +58,13 @@ export default function CustomerChat({ currentUser, handleLogout }) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, streamedText]);
 
-  const loadSessions = async () => {
+  const loadSessions = async (overrideId) => {
     if (!currentUser) return;
     try {
       const res = await axios.get(`${API_BASE}/conversations?userId=${currentUser._id}`);
       setConversations(res.data);
-      if (res.data.length > 0 && !currentId) {
+      const effectiveId = overrideId !== undefined ? overrideId : currentId;
+      if (res.data.length > 0 && !effectiveId) {
         selectSession(res.data[0].conversationId);
       }
     } catch (err) {
@@ -185,7 +186,7 @@ export default function CustomerChat({ currentUser, handleLogout }) {
       // Reload the entire session details to sync any tool call events with MongoDB
       if (activeSessionId) {
         selectSession(activeSessionId);
-        loadSessions();
+        loadSessions(activeSessionId);
       }
     } catch (err) {
       if (err.name === 'AbortError') {
@@ -211,7 +212,7 @@ export default function CustomerChat({ currentUser, handleLogout }) {
       setStreamedText(prev => prev + " \n\n*[Chat generation stopped by user]*");
       setTimeout(() => {
         if (currentId) selectSession(currentId);
-        loadSessions();
+        loadSessions(currentId);
       }, 500);
     }
   };
