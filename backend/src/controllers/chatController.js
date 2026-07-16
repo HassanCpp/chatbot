@@ -6,10 +6,11 @@ import RagService from '../services/ragService.js';
 import OpenAiService from '../services/openAiService.js';
 import { toolDefinitions, executeTool } from '../tools/chatbotTools.js';
 import { qdrantClient } from '../config/qdrant.js';
+import { generateSparseVector } from '../utils/sparseVectorizer.js';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
- * Perform a local cross-encoder Jaccard token-matching reranking pass 
+ * Perform a local cross-encoder token-matching overlap reranking pass 
  * on candidate documents to score query relevance.
  */
 function localCrossEncoderRerank(query, items, keyExtractor) {
@@ -119,12 +120,14 @@ Output ONLY a JSON object: {"intent": "category_name"}`
       });
     }
 
-    // Load active customer profile context
+    // Load active customer profile context and first name
     let customerContext = '';
+    let customerName = 'customer';
     if (userId && userId !== 'guest') {
       try {
         const user = await User.findById(userId);
         if (user) {
+          customerName = user.name.split(' ')[0];
           customerContext = `
 ACTIVE CUSTOMER PROFILE INFO:
 - Name: ${user.name}
@@ -152,7 +155,7 @@ Use this profile to guide Recommendations when they don't specify size/color pre
         // Rerank using local cross-encoder
         const reranked = localCrossEncoderRerank(message, ragContexts, item => item.text);
         
-        // NO_MATCH Floor Check
+        // NO_MATCH Floor Check (at least 30% overlap match)
         if (reranked[0].rerankScore < 0.30) {
           isNoMatchTriggered = true;
         } else {
@@ -185,50 +188,99 @@ Output ONLY a JSON object: {"category": "category_name_or_null", "color": "color
         console.warn('Filters extraction failed:', fErr.message);
       }
 
-      // Progressive Filter Relaxation Loop
-      let candidates = [];
+      // Progressive Filter Relaxation Loop inside Qdrant search
+      let qdrantResults = [];
+      const querySparse = generateSparseVector(message);
+      
       for (let level = 0; level <= 4; level++) {
-        let dbQuery = {};
+        const filterConditions = [];
         
-        if (level < 4 && filters.category) dbQuery.category = new RegExp(filters.category, 'i');
-        if (level < 3 && filters.size) dbQuery.sizes = filters.size;
-        if (level < 2 && filters.color) dbQuery.colors = new RegExp(filters.color, 'i');
-        if (level < 1 && filters.priceMax) dbQuery.price = { $lte: filters.priceMax };
-        
-        candidates = await Product.find(dbQuery).limit(20).lean();
-        if (candidates.length >= 3) {
-          console.log(`Filter relaxation level ${level} yielded ${candidates.length} products. Stop.`);
+        if (level < 4 && filters.category) {
+          filterConditions.push({ key: 'category', match: { value: filters.category } });
+        }
+        if (level < 3 && filters.size) {
+          filterConditions.push({ key: 'sizes', match: { value: filters.size } });
+        }
+        if (level < 2 && filters.color) {
+          filterConditions.push({ key: 'colors', match: { value: filters.color } });
+        }
+        if (level < 1 && filters.priceMax) {
+          filterConditions.push({ key: 'price', range: { lte: filters.priceMax } });
+        }
+
+        const queryFilter = filterConditions.length > 0 ? { must: filterConditions } : undefined;
+
+        try {
+          // Perform parallel hybrid searches on product catalog
+          const denseSearch = qdrantClient.search('novawear_products', {
+            vector: { name: 'dense', vector: queryVector },
+            filter: queryFilter,
+            limit: 10,
+            with_payload: true
+          });
+          const sparseSearch = qdrantClient.search('novawear_products', {
+            vector: { name: 'sparse', vector: querySparse },
+            filter: queryFilter,
+            limit: 10,
+            with_payload: true
+          });
+          
+          const [denseRes, sparseRes] = await Promise.all([denseSearch, sparseSearch]);
+          
+          // Fusion using RRF
+          const rrfScores = {};
+          const payloadMap = {};
+          
+          const computeRRF = (results) => {
+            results.forEach((match, index) => {
+              const id = match.id;
+              const rank = index + 1;
+              rrfScores[id] = (rrfScores[id] || 0) + (1 / (60 + rank));
+              if (!payloadMap[id]) {
+                payloadMap[id] = match;
+              }
+            });
+          };
+
+          computeRRF(denseRes);
+          computeRRF(sparseRes);
+
+          const sortedIds = Object.keys(rrfScores).sort((a, b) => rrfScores[b] - rrfScores[a]);
+          qdrantResults = sortedIds.map(id => payloadMap[id]);
+
+          if (qdrantResults.length >= 3) {
+            console.log(`Qdrant filter relaxation level ${level} yielded ${qdrantResults.length} product candidates.`);
+            break;
+          }
+        } catch (qErr) {
+          console.error('Qdrant products search failed in relaxation loop:', qErr.message);
           break;
         }
       }
 
-      if (candidates.length === 0) {
+      // Check product similarity floor score (Cosine score of the top vector candidate)
+      if (qdrantResults.length === 0 || qdrantResults[0].score < 0.65) {
         isNoMatchTriggered = true;
       } else {
-        // Cross-Encoder rerank
-        const reranked = localCrossEncoderRerank(
-          message, 
-          candidates, 
-          item => `${item.name} ${item.description} ${item.category} ${item.tags.join(' ')}`
-        );
-        
-        // Skip NO_MATCH floor check if the query is a general recommendation (no constraints extracted)
-        const isGeneralRecommendation = !filters.category && !filters.color && !filters.size && !filters.priceMax;
-        
-        if (reranked[0].rerankScore < 0.30 && !isGeneralRecommendation) {
-          isNoMatchTriggered = true;
-        } else {
-          // Take top products and apply Business Scoring
-          const sortedSet = reranked.slice(0, 5).map(r => {
-            const prod = r.item;
-            const stockLevel = prod.stock || 10;
-            const rating = prod.rating || 4.0;
-            const businessScore = (r.rerankScore * 0.6) + (rating * 0.08) + (stockLevel > 0 ? 0.2 : 0);
-            return { prod, businessScore };
-          }).sort((a, b) => b.businessScore - a.businessScore);
-          
-          retrievedProducts = sortedSet.map(s => s.prod);
+        // Resolve MongoDB details & apply Business Scoring formula
+        const candidateProducts = [];
+        for (const match of qdrantResults.slice(0, 5)) {
+          const payload = match.payload;
+          try {
+            const prod = await Product.findById(payload.productId).lean();
+            if (prod) {
+              const stockLevel = prod.stock || 10;
+              const rating = prod.rating || 4.0;
+              const businessScore = (match.score * 0.6) + (rating * 0.08) + (stockLevel > 0 ? 0.2 : 0);
+              candidateProducts.push({ prod, businessScore });
+            }
+          } catch (dbErr) {
+            console.warn(`Failed to retrieve live details for product ID ${payload.productId}:`, dbErr.message);
+          }
         }
+
+        candidateProducts.sort((a, b) => b.businessScore - a.businessScore);
+        retrievedProducts = candidateProducts.map(c => c.prod);
       }
     }
 
@@ -241,7 +293,7 @@ Output ONLY a JSON object: {"category": "category_name_or_null", "color": "color
         maxSimilarityScore: 0
       });
       
-      const fallbackResponse = `I apologize, hassan, but I couldn't find any specific store policies or items matching your search details at the moment. Could you clarify your preference or ask about a different product category?`;
+      const fallbackResponse = `I apologize, ${customerName}, but I couldn't find any specific store policies or items matching your search details at the moment. Could you clarify your preference or ask about a different product category?`;
       
       res.write(`data: ${JSON.stringify({ type: 'chunk', chunk: fallbackResponse })}\n\n`);
       
