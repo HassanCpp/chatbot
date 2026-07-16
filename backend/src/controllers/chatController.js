@@ -75,6 +75,22 @@ export const handleChatMessage = async (req, res) => {
       if (cacheMatches.length > 0 && cacheMatches[0].score >= 0.95) {
         console.log(`Semantic cache HIT (score: ${cacheMatches[0].score.toFixed(2)})`);
         res.write(`data: ${JSON.stringify({ type: 'chunk', chunk: cacheMatches[0].payload.response })}\n\n`);
+        
+        // Save cache hit details to MongoDB conversation log
+        let conversation = await Conversation.findOne({ conversationId });
+        if (!conversation) {
+          conversation = await Conversation.create({
+            conversationId,
+            userId,
+            messages: [],
+            summary: 'New Customer Chat'
+          });
+        }
+        conversation.messages.push({ role: 'user', content: message, timestamp: new Date() });
+        conversation.messages.push({ role: 'assistant', content: cacheMatches[0].payload.response, timestamp: new Date() });
+        conversation.lastUpdated = new Date();
+        await conversation.save();
+
         res.write('data: [DONE]\n\n');
         return res.end();
       }
@@ -258,8 +274,8 @@ Output ONLY a JSON object: {"category": "category_name_or_null", "color": "color
         }
       }
 
-      // Check product similarity floor score (Cosine score of the top vector candidate)
-      if (qdrantResults.length === 0 || qdrantResults[0].score < 0.65) {
+      // Check product similarity floor score (generous floor threshold for product catalog matching)
+      if (qdrantResults.length === 0 || qdrantResults[0].score < 0.50) {
         isNoMatchTriggered = true;
       } else {
         // Resolve MongoDB details & apply Business Scoring formula
