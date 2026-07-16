@@ -23,7 +23,7 @@ import {
   PRODUCTS_COLLECTION 
 } from '../config/qdrant.js';
 import { generateMockProducts } from './generators/productGenerator.js';
-import { generateMockUsers } from './generators/userGenerator.js';
+import { generateMockUsers, hashPassword } from './generators/userGenerator.js';
 import { generateMockOrders } from './generators/orderGenerator.js';
 import { generateMockReviews } from './generators/reviewGenerator.js';
 import { generateSparseVector } from './sparseVectorizer.js';
@@ -108,8 +108,23 @@ export const seedDatabase = async () => {
 
     console.log('Generating 500 customer users with style preferences...');
     const rawUsers = generateMockUsers(500);
+    
+    // Explicitly seed the default admin account to prevent lockout
+    rawUsers.push({
+      name: 'Hassan Waqar',
+      email: 'hassanwaqar475@gmail.com',
+      password: hashPassword('password123'),
+      role: 'admin',
+      preferences: {
+        size: 'L',
+        color: 'Black',
+        category: 'Jackets',
+        budget: 150
+      }
+    });
+
     const createdUsers = await User.insertMany(rawUsers);
-    console.log('✅ 500 users seeded in MongoDB.');
+    console.log('✅ 501 users seeded in MongoDB (including primary admin).');
 
     console.log('Generating 2,000 realistic purchase orders...');
     const rawOrders = generateMockOrders(createdUsers, createdProducts, 2000);
