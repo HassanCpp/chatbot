@@ -212,7 +212,10 @@ Output ONLY a JSON object: {"category": "category_name_or_null", "color": "color
           item => `${item.name} ${item.description} ${item.category} ${item.tags.join(' ')}`
         );
         
-        if (reranked[0].rerankScore < 0.30) {
+        // Skip NO_MATCH floor check if the query is a general recommendation (no constraints extracted)
+        const isGeneralRecommendation = !filters.category && !filters.color && !filters.size && !filters.priceMax;
+        
+        if (reranked[0].rerankScore < 0.30 && !isGeneralRecommendation) {
           isNoMatchTriggered = true;
         } else {
           // Take top products and apply Business Scoring
