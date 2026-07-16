@@ -18,6 +18,7 @@ export const qdrantClient = new QdrantClient({
 // Semantic Vector Collection names
 export const COLLECTION_NAME = 'novawear_knowledge';
 export const PRODUCTS_COLLECTION = 'novawear_products';
+export const CACHE_COLLECTION = 'novawear_cache';
 
 /**
  * Vector Store Collection Initializer:
@@ -28,29 +29,64 @@ export const initQdrant = async () => {
   try {
     const collections = await qdrantClient.getCollections();
     
-    // Initialize Knowledge Base Collection (Policies, fit sheets, Q&A data)
-    const knowledgeExists = collections.collections.some(c => c.name === COLLECTION_NAME);
-    if (!knowledgeExists) {
-      console.log(`Creating Qdrant collection: ${COLLECTION_NAME}...`);
-      await qdrantClient.createCollection(COLLECTION_NAME, {
-        vectors: { size: 1536, distance: 'Cosine' }
-      });
-      console.log(`Qdrant collection ${COLLECTION_NAME} created successfully.`);
-    } else {
-      console.log(`Qdrant collection ${COLLECTION_NAME} already exists.`);
-    }
+    const ensureCollection = async (name, enableSparse) => {
+      const exists = collections.collections.some(c => c.name === name);
+      let recreate = false;
+      
+      if (exists) {
+        try {
+          const info = await qdrantClient.getCollection(name);
+          const params = info.config?.params || {};
+          
+          if (enableSparse) {
+            // Check if collection has named dense vector 'dense' and sparse vector 'sparse'
+            const hasDenseName = params.vectors && params.vectors.dense;
+            const hasSparse = params.sparse_vectors && params.sparse_vectors.sparse;
+            if (!hasDenseName || !hasSparse) {
+              console.log(`Collection ${name} has outdated structure. Recreating for hybrid search...`);
+              await qdrantClient.deleteCollection(name);
+              recreate = true;
+            }
+          }
+        } catch (e) {
+          console.warn(`Error checking collection ${name}:`, e.message);
+          recreate = true;
+        }
+      } else {
+        recreate = true;
+      }
 
-    // Initialize Products Collection (Semantic product metadata descriptions)
-    const productsExists = collections.collections.some(c => c.name === PRODUCTS_COLLECTION);
-    if (!productsExists) {
-      console.log(`Creating Qdrant collection: ${PRODUCTS_COLLECTION}...`);
-      await qdrantClient.createCollection(PRODUCTS_COLLECTION, {
-        vectors: { size: 1536, distance: 'Cosine' }
-      });
-      console.log(`Qdrant collection ${PRODUCTS_COLLECTION} created successfully.`);
-    } else {
-      console.log(`Qdrant collection ${PRODUCTS_COLLECTION} already exists.`);
-    }
+      if (recreate) {
+        if (enableSparse) {
+          console.log(`Creating Qdrant hybrid collection: ${name}...`);
+          await qdrantClient.createCollection(name, {
+            vectors: {
+              dense: {
+                size: 1536,
+                distance: 'Cosine'
+              }
+            },
+            sparse_vectors: {
+              sparse: {}
+            }
+          });
+          console.log(`Created Qdrant hybrid collection: ${name} successfully.`);
+        } else {
+          console.log(`Creating Qdrant cache collection: ${name}...`);
+          await qdrantClient.createCollection(name, {
+            vectors: { size: 1536, distance: 'Cosine' }
+          });
+          console.log(`Created Qdrant cache collection: ${name} successfully.`);
+        }
+      } else {
+        console.log(`Qdrant collection ${name} already exists and is valid.`);
+      }
+    };
+
+    await ensureCollection(COLLECTION_NAME, true);
+    await ensureCollection(PRODUCTS_COLLECTION, true);
+    await ensureCollection(CACHE_COLLECTION, false);
+
   } catch (error) {
     console.error(`Qdrant Connection/Initialization Error: ${error.message}`);
     console.warn(`WARNING: Qdrant service is either offline or unreachable at ${qdrantUrl}. RAG/Product Search vectors will be bypassed dynamically.`);

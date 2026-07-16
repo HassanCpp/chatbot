@@ -5,6 +5,7 @@ const uploadedKnowledgeSchema = new mongoose.Schema({
   filePath: { type: String, required: true },
   fileSize: { type: Number, required: true }, // in bytes
   fileType: { type: String, required: true }, // e.g. 'application/pdf', 'text/markdown'
+  fileHash: { type: String },
   chunkCount: { type: Number, default: 0 },
   qdrantIds: [{ type: String }], // Vector IDs associated with this file in Qdrant
   indexed: { type: Boolean, default: false },

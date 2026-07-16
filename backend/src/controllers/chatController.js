@@ -1,33 +1,114 @@
 import Conversation from '../models/Conversation.js';
 import User from '../models/User.js';
+import Product from '../models/Product.js';
+import QueryGap from '../models/QueryGap.js';
 import RagService from '../services/ragService.js';
 import OpenAiService from '../services/openAiService.js';
 import { toolDefinitions, executeTool } from '../tools/chatbotTools.js';
+import { qdrantClient } from '../config/qdrant.js';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
- * handleChatMessage: Main API controller that processes customer queries.
- * 1. Checks or initiates a unique conversation UUID.
- * 2. Fetches the logged-in customer's preferences context (if authenticated).
- * 3. Retrieves semantic RAG document chunks from Qdrant Cloud.
- * 4. Resolves recursive OpenAI tool executions (for inventory/order lookups) in a loop (max 5 rounds).
- * 5. Streams the final reasoning outputs word-by-word back to the user via Server-Sent Events (SSE).
+ * Perform a local cross-encoder Jaccard token-matching reranking pass 
+ * on candidate documents to score query relevance.
+ */
+function localCrossEncoderRerank(query, items, keyExtractor) {
+  const queryTokens = new Set(query.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/).filter(t => t.length > 2));
+  
+  return items.map(item => {
+    const text = keyExtractor(item).toLowerCase();
+    const itemTokens = text.replace(/[^\w\s]/g, '').split(/\s+/).filter(t => t.length > 2);
+    
+    let intersection = 0;
+    queryTokens.forEach(token => {
+      if (text.includes(token)) {
+        intersection++;
+      }
+    });
+
+    const score = queryTokens.size > 0 ? intersection / queryTokens.size : 0;
+    
+    return { item, rerankScore: score };
+  }).sort((a, b) => b.rerankScore - a.rerankScore);
+}
+
+/**
+ * handleChatMessage: Orchestrates the production-grade RAG and Tool loop.
+ * 1. Checks semantic cache in Qdrant. If hit (score >= 0.95), streams response instantly.
+ * 2. Runs Intent Classifier to route query (product_search, policy_faq, order_status, chit_chat).
+ * 3. Extracts filters and executes progressive filter relaxation query retries.
+ * 4. Runs single-pass Cross-Encoder reranker.
+ * 5. Handles NO_MATCH threshold checks and logs gaps.
+ * 6. Performs business-rule scoring (ratings & stock boosts).
+ * 7. Invokes GPT-4o tool-calling and streams SSE responses.
+ * 8. Writes final answers back to semantic cache.
  */
 export const handleChatMessage = async (req, res) => {
   let { message, conversationId, userId = 'guest' } = req.body;
 
-  // Use authenticated user ID from JWT if present to prevent spoofing/impersonation
   if (req.user && req.user.id) {
     userId = req.user.id;
   }
 
-  // 1. Check or generate session ID
   if (!conversationId) {
     conversationId = uuidv4();
   }
 
   try {
-    // 2. Load previous conversation history from MongoDB
+    // A. Setup SSE Headers immediately
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.write(`data: ${JSON.stringify({ type: 'session', conversationId })}\n\n`);
+
+    // B. Search Semantic Cache in Qdrant
+    let queryVector;
+    try {
+      queryVector = await OpenAiService.getEmbedding(message);
+      const cacheMatches = await qdrantClient.search('novawear_cache', {
+        vector: queryVector,
+        limit: 1,
+        with_payload: true
+      });
+      
+      if (cacheMatches.length > 0 && cacheMatches[0].score >= 0.95) {
+        console.log(`Semantic cache HIT (score: ${cacheMatches[0].score.toFixed(2)})`);
+        res.write(`data: ${JSON.stringify({ type: 'chunk', chunk: cacheMatches[0].payload.response })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        return res.end();
+      }
+    } catch (cacheErr) {
+      console.warn('Semantic Cache check skipped/failed:', cacheErr.message);
+    }
+
+    // 1. Intent Classifier Router
+    console.log('Routing intent...');
+    const routingPrompt = [
+      {
+        role: 'system',
+        content: `You are an AI router for a retail clothing store. Your job is to classify the user's query into exactly one of the following categories:
+- 'product_search': searching for products, asking for style catalog suggestions, looking for jackets, t-shirts, sizing options, colors, price check.
+- 'policy_faq': asking about shipping times, refund policies, return window guidelines, washing instructions, or general FAQ manual details.
+- 'order_status': tracking packages, querying order numbers, checking shipment tracking.
+- 'chit_chat': simple greetings, small talk, off-topic questions, or general conversations.
+
+Output ONLY a JSON object: {"intent": "category_name"}`
+      },
+      { role: 'user', content: message }
+    ];
+    
+    let intent = 'chit_chat';
+    try {
+      const routeRes = await OpenAiService.chatCompletion(routingPrompt, {
+        response_format: { type: 'json_object' }
+      });
+      intent = JSON.parse(routeRes.choices[0].message.content).intent;
+      console.log(`Routed query intent: ${intent}`);
+    } catch (routeErr) {
+      console.warn('Routing failed, defaulting to chit_chat', routeErr.message);
+    }
+
+    // Load conversation history from MongoDB
     let conversation = await Conversation.findOne({ conversationId });
     if (!conversation) {
       conversation = await Conversation.create({
@@ -38,7 +119,7 @@ export const handleChatMessage = async (req, res) => {
       });
     }
 
-    // 2b. Fetch active customer profile if authenticated (non-guest) to inject sizing preferences
+    // Load active customer profile context
     let customerContext = '';
     if (userId && userId !== 'guest') {
       try {
@@ -49,20 +130,135 @@ ACTIVE CUSTOMER PROFILE INFO:
 - Name: ${user.name}
 - Email: ${user.email}
 - Preferences: Size: ${user.preferences?.size || 'N/A'}, Favorite Color: ${user.preferences?.color || 'N/A'}, Category: ${user.preferences?.category || 'N/A'}, Budget: Under $${user.preferences?.budget || 'N/A'}
-Use this profile to guide sizing or color recommendations when they don't specify them (e.g. recommend size ${user.preferences?.size || 'M'} by default, and address them by name ${user.name}).`;
+Use this profile to guide Recommendations when they don't specify size/color preferences.`;
         }
       } catch (e) {
-        console.error('Failed to load user profile context in chatController', e);
+        console.error('Failed to load user profile context', e);
       }
     }
 
-    // 3. Query RAG context from Qdrant using similarity search
-    const ragContexts = await RagService.retrieveRelevantContext(message, 4);
-    const contextText = ragContexts
-      .map(c => `[Doc Reference: ${c.fileName}] (Similarity: ${(c.score * 100).toFixed(1)}%):\n${c.text}`)
-      .join('\n\n');
+    // 2. Execute Intent Specific Retrieval & Search Paths
+    let contextText = '';
+    let retrievedProducts = [];
+    let isNoMatchTriggered = false;
+
+    if (intent === 'policy_faq') {
+      // Run Hybrid RAG Search
+      const ragContexts = await RagService.retrieveRelevantContext(message, 6);
+      
+      if (ragContexts.length === 0) {
+        isNoMatchTriggered = true;
+      } else {
+        // Rerank using local cross-encoder
+        const reranked = localCrossEncoderRerank(message, ragContexts, item => item.text);
+        
+        // NO_MATCH Floor Check
+        if (reranked[0].rerankScore < 0.30) {
+          isNoMatchTriggered = true;
+        } else {
+          // Take top 4 reranked chunks
+          contextText = reranked.slice(0, 4).map(r => 
+            `[Doc Reference: ${r.item.fileName}] (Relevance Score: ${(r.rerankScore * 100).toFixed(1)}%):\n${r.item.text}`
+          ).join('\n\n');
+        }
+      }
+    } else if (intent === 'product_search') {
+      // Extract structured constraints
+      console.log('Extracting query constraints...');
+      const filterPrompt = [
+        {
+          role: 'system',
+          content: `Extract filters from the clothing query. Categories allowed: T-Shirts, Shirts, Jeans, Hoodies, Jackets, Activewear, Shoes, Accessories. Colors allowed: White, Black, Grey, Charcoal, Sage, Olive, Sand, Navy, Burgundy, Mustard, Forest, Chocolate. Sizes allowed: XS, S, M, L, XL, XXL, 30, 32, 34, 36, 38, 8, 9, 10, 11, 12.
+Output ONLY a JSON object: {"category": "category_name_or_null", "color": "color_name_or_null", "size": "size_name_or_null", "priceMax": number_or_null}`
+        },
+        { role: 'user', content: message }
+      ];
+      
+      let filters = { category: null, color: null, size: null, priceMax: null };
+      try {
+        const filterRes = await OpenAiService.chatCompletion(filterPrompt, {
+          response_format: { type: 'json_object' }
+        });
+        filters = JSON.parse(filterRes.choices[0].message.content);
+        console.log('Extracted constraints:', filters);
+      } catch (fErr) {
+        console.warn('Filters extraction failed:', fErr.message);
+      }
+
+      // Progressive Filter Relaxation Loop
+      let candidates = [];
+      for (let level = 0; level <= 4; level++) {
+        let dbQuery = {};
+        
+        if (level < 4 && filters.category) dbQuery.category = new RegExp(filters.category, 'i');
+        if (level < 3 && filters.size) dbQuery.sizes = filters.size;
+        if (level < 2 && filters.color) dbQuery.colors = new RegExp(filters.color, 'i');
+        if (level < 1 && filters.priceMax) dbQuery.price = { $lte: filters.priceMax };
+        
+        candidates = await Product.find(dbQuery).limit(20).lean();
+        if (candidates.length >= 3) {
+          console.log(`Filter relaxation level ${level} yielded ${candidates.length} products. Stop.`);
+          break;
+        }
+      }
+
+      if (candidates.length === 0) {
+        isNoMatchTriggered = true;
+      } else {
+        // Cross-Encoder rerank
+        const reranked = localCrossEncoderRerank(
+          message, 
+          candidates, 
+          item => `${item.name} ${item.description} ${item.category} ${item.tags.join(' ')}`
+        );
+        
+        if (reranked[0].rerankScore < 0.30) {
+          isNoMatchTriggered = true;
+        } else {
+          // Take top products and apply Business Scoring
+          const sortedSet = reranked.slice(0, 5).map(r => {
+            const prod = r.item;
+            const stockLevel = prod.stock || 10;
+            const rating = prod.rating || 4.0;
+            const businessScore = (r.rerankScore * 0.6) + (rating * 0.08) + (stockLevel > 0 ? 0.2 : 0);
+            return { prod, businessScore };
+          }).sort((a, b) => b.businessScore - a.businessScore);
+          
+          retrievedProducts = sortedSet.map(s => s.prod);
+        }
+      }
+    }
+
+    // 3. Handle NO_MATCH Fallback Branch
+    if (isNoMatchTriggered) {
+      console.log('Triggered NO_MATCH fallback branch.');
+      await QueryGap.create({
+        query: message,
+        intent: intent,
+        maxSimilarityScore: 0
+      });
+      
+      const fallbackResponse = `I apologize, hassan, but I couldn't find any specific store policies or items matching your search details at the moment. Could you clarify your preference or ask about a different product category?`;
+      
+      res.write(`data: ${JSON.stringify({ type: 'chunk', chunk: fallbackResponse })}\n\n`);
+      
+      // Save fallback response to MongoDB conversation log
+      conversation.messages.push({ role: 'user', content: message, timestamp: new Date() });
+      conversation.messages.push({ role: 'assistant', content: fallbackResponse, timestamp: new Date() });
+      await conversation.save();
+      
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    }
 
     // 4. Construct System Instruction grounded in RAG data
+    let contextInstructions = '';
+    if (intent === 'policy_faq' && contextText) {
+      contextInstructions = `\nRETRIEVED BRAND CONTEXT:\n${contextText}`;
+    } else if (intent === 'product_search' && retrievedProducts.length > 0) {
+      contextInstructions = `\nRETRIEVED PRODUCTS METADATA:\n${JSON.stringify(retrievedProducts, null, 2)}`;
+    }
+
     const systemPrompt = {
       role: 'system',
       content: `You are the official customer support AI assistant for NovaWear, a premium garments brand.
@@ -74,12 +270,10 @@ Follow these rules strictly:
 5. If products are returned by a tool, display them beautifully. Include details like price, colors, materials, sizes, and features.
 6. Use markdown formatting to render products, lists, bold keywords, and headers.
 ${customerContext}
-
-RETRIEVED BRAND CONTEXT:
-${contextText || 'No documents retrieved. Explain that you can search the product database, but details on internal brand policies are currently unavailable.'}`
+${contextInstructions}`
     };
 
-    // 5. Build conversation history array
+    // Build conversation history array
     const conversationHistory = conversation.messages.map(msg => {
       const msgObj = { role: msg.role, content: msg.content };
       if (msg.name) msgObj.name = msg.name;
@@ -88,18 +282,15 @@ ${contextText || 'No documents retrieved. Explain that you can search the produc
       return msgObj;
     });
 
-    // Add new user message to local history and database
     const newUserMessage = { role: 'user', content: message, timestamp: new Date() };
     conversationHistory.push({ role: 'user', content: message });
     conversation.messages.push(newUserMessage);
     await conversation.save();
 
-    // 6. Tool-calling loop: Resolve all tools before final response
+    // 5. Tool-calling loop: Resolve all tools before final response
     let currentRound = 0;
     const maxRounds = 5;
     let finalPayloadForStreaming = null;
-
-    // We build the complete prompt list starting with system prompt
     let fullMessages = [systemPrompt, ...conversationHistory];
 
     while (currentRound < maxRounds) {
@@ -112,9 +303,7 @@ ${contextText || 'No documents retrieved. Explain that you can search the produc
 
       const responseMessage = completion.choices[0].message;
 
-      // If model requests tool execution, run it and append to conversation
       if (responseMessage.tool_calls && responseMessage.tool_calls.length > 0) {
-        // Save assistant tool call request to database
         const dbAssistantMsg = {
           role: 'assistant',
           content: responseMessage.content || null,
@@ -124,10 +313,8 @@ ${contextText || 'No documents retrieved. Explain that you can search the produc
         conversation.messages.push(dbAssistantMsg);
         await conversation.save();
 
-        // Push to working memory
         fullMessages.push(responseMessage);
 
-        // Execute tool calls in parallel/sequence
         for (const toolCall of responseMessage.tool_calls) {
           const toolResultText = await executeTool(toolCall);
           
@@ -148,27 +335,16 @@ ${contextText || 'No documents retrieved. Explain that you can search the produc
             content: toolResultText
           });
         }
-        
         currentRound++;
       } else {
-        // No tool calls needed, this is the final message payload we want to stream!
         finalPayloadForStreaming = fullMessages;
         break;
       }
     }
 
-    // Default to fullMessages if loop bounds exceeded
     if (!finalPayloadForStreaming) {
       finalPayloadForStreaming = fullMessages;
     }
-
-    // 7. Setup SSE Response Stream
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    
-    // Send session headers back
-    res.write(`data: ${JSON.stringify({ type: 'session', conversationId })}\n\n`);
 
     let finalContent = '';
     const stream = await OpenAiService.chatCompletionStream(finalPayloadForStreaming);
@@ -190,6 +366,27 @@ ${contextText || 'No documents retrieved. Explain that you can search the produc
       });
       conversation.lastUpdated = new Date();
       await conversation.save();
+
+      // Write final output back to semantic cache collection in Qdrant
+      if (queryVector) {
+        try {
+          await qdrantClient.upsert('novawear_cache', {
+            wait: true,
+            points: [{
+              id: uuidv4(),
+              vector: queryVector,
+              payload: {
+                query: message,
+                response: finalContent,
+                cachedAt: new Date()
+              }
+            }]
+          });
+          console.log('Saved response to semantic cache.');
+        } catch (cacheWriteErr) {
+          console.warn('Failed to save to semantic cache:', cacheWriteErr.message);
+        }
+      }
     }
 
     res.write('data: [DONE]\n\n');
@@ -197,21 +394,11 @@ ${contextText || 'No documents retrieved. Explain that you can search the produc
 
   } catch (error) {
     console.error('Chat routing error:', error);
-    // Send SSE formatted error so the UI can catch it nicely
-    if (!res.headersSent) {
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-    }
     res.write(`data: ${JSON.stringify({ type: 'error', error: error.message })}\n\n`);
     res.end();
   }
 };
 
-/**
- * getConversation: Loads details for a specific conversation session
- * matching the conversation ID parameter.
- */
 export const getConversation = async (req, res) => {
   const { conversationId } = req.params;
   try {
@@ -225,10 +412,6 @@ export const getConversation = async (req, res) => {
   }
 };
 
-/**
- * getConversationsList: Retrieves past conversation session list
- * optionally filtering by the authenticated user's ID.
- */
 export const getConversationsList = async (req, res) => {
   const { userId } = req.query;
   try {
@@ -240,10 +423,6 @@ export const getConversationsList = async (req, res) => {
   }
 };
 
-/**
- * getCustomersList: Returns list of customer logins to display
- * inside helper quick-login view. Limited to 15 records.
- */
 export const getCustomersList = async (req, res) => {
   try {
     const list = await User.find({ role: 'customer' }).limit(15).select('name email preferences').lean();

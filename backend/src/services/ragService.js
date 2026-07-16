@@ -1,10 +1,12 @@
 import fs from 'fs';
+import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import pdf from 'pdf-parse';
 import mammoth from 'mammoth';
 import OpenAiService from './openAiService.js';
 import { qdrantClient, COLLECTION_NAME } from '../config/qdrant.js';
 import UploadedKnowledge from '../models/UploadedKnowledge.js';
+import { generateSparseVector } from '../utils/sparseVectorizer.js';
 
 /**
  * RagService: Orchestrates the processing of text manuals.
@@ -90,6 +92,15 @@ class RagService {
    * @returns {Promise<object>} UploadedKnowledge MongoDB schema record instance
    */
   static async indexDocument(fileInfo, buffer) {
+    // 1. Calculate SHA-256 hash of the buffer for deduplication check
+    const fileHash = crypto.createHash('sha256').update(buffer).digest('hex');
+    const existing = await UploadedKnowledge.findOne({ fileHash });
+    
+    if (existing) {
+      console.log(`Document duplicate detected by hash: ${fileHash}. Skipping embedding generation.`);
+      return existing;
+    }
+
     const text = await this.parseDocument(buffer, fileInfo.mimetype);
     const chunks = this.chunkText(text);
 
@@ -97,7 +108,7 @@ class RagService {
       throw new Error('Document content is empty or could not be parsed.');
     }
 
-    console.log(`Document parsed. Creating embeddings for ${chunks.length} chunks...`);
+    console.log(`Document parsed. Creating hybrid embeddings for ${chunks.length} chunks...`);
 
     const qdrantIds = [];
     const points = [];
@@ -105,13 +116,17 @@ class RagService {
     for (let i = 0; i < chunks.length; i++) {
       const chunkText = chunks[i];
       const embedding = await OpenAiService.getEmbedding(chunkText);
+      const sparse = generateSparseVector(chunkText);
       const pointId = uuidv4();
       
       qdrantIds.push(pointId);
 
       points.push({
         id: pointId,
-        vector: embedding,
+        vector: {
+          dense: embedding,
+          sparse: sparse
+        },
         payload: {
           fileName: fileInfo.originalname,
           filePath: fileInfo.path || 'seeded',
@@ -142,6 +157,7 @@ class RagService {
       filePath: fileInfo.path || 'seeded',
       fileSize: fileInfo.size || buffer.length,
       fileType: fileInfo.mimetype,
+      fileHash: fileHash,
       chunkCount: chunks.length,
       qdrantIds: qdrantIds,
       indexed: indexedInQdrant,
@@ -152,8 +168,8 @@ class RagService {
   }
 
   /**
-   * Search for similar text chunks in Qdrant based on query embedding vector similarity.
-   * If Qdrant is unavailable, does a keyword-based MongoDB backup search or returns empty.
+   * Search for similar text chunks in Qdrant based on hybrid dense and sparse query matches.
+   * Fuses dense and sparse matching points using Reciprocal Rank Fusion (RRF).
    * @param {string} query - The search text query
    * @param {number} limit - Maximum matches to return (default: 5)
    * @returns {Promise<object[]>} Matched context objects containing text content and similarity score
@@ -161,24 +177,54 @@ class RagService {
   static async retrieveRelevantContext(query, limit = 5) {
     try {
       const queryVector = await OpenAiService.getEmbedding(query);
+      const querySparse = generateSparseVector(query);
       
-      const searchResults = await qdrantClient.search(COLLECTION_NAME, {
-        vector: queryVector,
-        limit: limit,
+      // Execute dense and sparse searches in parallel
+      const denseSearchPromise = qdrantClient.search(COLLECTION_NAME, {
+        vector: { name: 'dense', vector: queryVector },
+        limit: limit * 2,
         with_payload: true
       });
 
-      return searchResults.map(match => ({
-        text: match.payload.text,
-        score: match.score,
-        fileName: match.payload.fileName
-      }));
-    } catch (error) {
-      console.warn('Qdrant retrieval error, falling back to local mock check:', error.message);
+      const sparseSearchPromise = qdrantClient.search(COLLECTION_NAME, {
+        vector: { name: 'sparse', vector: querySparse },
+        limit: limit * 2,
+        with_payload: true
+      });
+
+      const [denseResults, sparseResults] = await Promise.all([denseSearchPromise, sparseSearchPromise]);
+
+      // Fusion using Reciprocal Rank Fusion (RRF)
+      const rrfScores = {};
+      const payloadMap = {};
       
-      // Secondary fallback: retrieve indexed files metadata
-      // and perform simple keyword scanning on stored details.
-      // (This prevents crashing if Qdrant is offline).
+      const computeRRF = (results) => {
+        results.forEach((match, index) => {
+          const id = match.id;
+          const rank = index + 1;
+          rrfScores[id] = (rrfScores[id] || 0) + (1 / (60 + rank));
+          if (!payloadMap[id]) {
+            payloadMap[id] = match;
+          }
+        });
+      };
+
+      computeRRF(denseResults);
+      computeRRF(sparseResults);
+
+      // Sort candidate point IDs by RRF score descending
+      const sortedIds = Object.keys(rrfScores).sort((a, b) => rrfScores[b] - rrfScores[a]);
+
+      return sortedIds.slice(0, limit).map(id => {
+        const match = payloadMap[id];
+        return {
+          text: match.payload.text,
+          score: match.score, // Fallback score indicator
+          fileName: match.payload.fileName
+        };
+      });
+    } catch (error) {
+      console.warn('Qdrant retrieval error, returning empty list:', error.message);
       return [];
     }
   }
@@ -253,6 +299,8 @@ class RagService {
             }
           }
 
+          const fileHash = crypto.createHash('sha256').update(buffer).digest('hex');
+
           // Re-parse and index
           const text = await this.parseDocument(buffer, mimeType);
           const chunks = this.chunkText(text);
@@ -260,16 +308,22 @@ class RagService {
           const points = [];
 
           for (let i = 0; i < chunks.length; i++) {
-            const embedding = await OpenAiService.getEmbedding(chunks[i]);
+            const chunkText = chunks[i];
+            const embedding = await OpenAiService.getEmbedding(chunkText);
+            const sparse = generateSparseVector(chunkText);
             const pointId = uuidv4();
+            
             qdrantIds.push(pointId);
             points.push({
               id: pointId,
-              vector: embedding,
+              vector: {
+                dense: embedding,
+                sparse: sparse
+              },
               payload: {
                 fileName: doc.fileName,
                 filePath: doc.filePath,
-                text: chunks[i],
+                text: chunkText,
                 chunkIndex: i,
                 totalChunks: chunks.length
               }
@@ -280,6 +334,7 @@ class RagService {
           
           doc.chunkCount = chunks.length;
           doc.qdrantIds = qdrantIds;
+          doc.fileHash = fileHash;
           doc.indexed = true;
           doc.indexedAt = new Date();
           await doc.save();

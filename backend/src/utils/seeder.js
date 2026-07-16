@@ -26,6 +26,7 @@ import { generateMockProducts } from './generators/productGenerator.js';
 import { generateMockUsers } from './generators/userGenerator.js';
 import { generateMockOrders } from './generators/orderGenerator.js';
 import { generateMockReviews } from './generators/reviewGenerator.js';
+import { generateSparseVector } from './sparseVectorizer.js';
 
 dotenv.config();
 
@@ -213,12 +214,14 @@ export const seedDatabase = async () => {
         // Request embeddings batch from OpenAI
         const embeddings = await OpenAiService.getEmbeddingsBatch(textBlocks);
 
-        // Build Qdrant points
         const points = productSlice.map((p, idx) => {
           const pointId = mongoToUuid(p._id);
           return {
             id: pointId,
-            vector: embeddings[idx],
+            vector: {
+              dense: embeddings[idx],
+              sparse: generateSparseVector(textBlocks[idx])
+            },
             payload: {
               productId: p._id.toString(),
               sku: p.sku,
